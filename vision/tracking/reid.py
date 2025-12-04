@@ -45,7 +45,7 @@ class REID:
         f = torch.cat(f, 0)
         return f
     
-    def _feature(self, img):
+    def _feature(self, img): # Process single image to work on real time
         img = Image.fromarray(img.astype('uint8')).convert('RGB')
         img = self.transform_te(img)
         img = torch.unsqueeze(img, 0)
