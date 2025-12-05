@@ -16,3 +16,4 @@ imageio
 torch
 torchvision
 boxmot
+ultralytics
