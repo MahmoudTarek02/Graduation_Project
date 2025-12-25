@@ -7,9 +7,9 @@ from pathlib import Path
 from reid import REID
 import operator
 from datetime import datetime
+import time
 
 
-# MAIN PIPELINE 
 class YOLODetector:
     def __init__(self, model_path="yolov8n.pt", device="cuda"):
         print(f"Initializing YOLO detector with model: {model_path}")
@@ -22,6 +22,8 @@ class YOLODetector:
 
         boxes = []
         for b in results.boxes:
+            if b.cls[0] != 0:  # Only keep person class (class 0)
+                continue
             x1, y1, x2, y2 = b.xyxy[0].tolist()
             conf = float(b.conf[0])
             cls = int(b.cls[0])
@@ -30,7 +32,6 @@ class YOLODetector:
         return np.array(boxes)
 
 
-# MAIN PIPELINE 
 class TrackerWrapper:
     def __init__(self, device="cuda"):
         print(f"Initializing ByteTrack tracker on device: {device}")
@@ -46,7 +47,6 @@ class TrackerWrapper:
         self.tracker.plot_results(frame, show_trajectories=True)
 
 
-# MAIN PIPELINE 
 class ReIDManager:
     def __init__(self, threshold=600):
         print(f"Initializing ReID Manager with threshold: {threshold}")
@@ -144,7 +144,6 @@ class ReIDManager:
         return self.final_fuse_id
 
 
-# MAIN PIPELINE 
 class PersonTrackingPipeline:
     def __init__(self, src=0):
         # Print startup info
@@ -180,6 +179,7 @@ class PersonTrackingPipeline:
         with torch.inference_mode():
             frame_count = 0
             while True:
+                t1 = time.time()
                 ok, frame = self.cap.read()
                 if not ok:
                     print("\nEnd of video stream")
@@ -187,7 +187,7 @@ class PersonTrackingPipeline:
 
                 disp, fuse = self.process_frame(frame)
                 frame_count += 1
-
+                print(f"FPS = {1/(time.time() - t1):.2f}")
                 cv2.imshow("YOLO + ByteTrack + ReID", disp)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print(f"\nUser quit after {frame_count} frames")
@@ -204,5 +204,5 @@ class PersonTrackingPipeline:
 
 
 if __name__ == "__main__":
-    pipeline = PersonTrackingPipeline(src=0)
+    pipeline = PersonTrackingPipeline(src="Videos\\Security_camera.mp4")
     pipeline.start()
