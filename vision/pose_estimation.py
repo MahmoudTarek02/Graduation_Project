@@ -219,7 +219,11 @@ def main():
     detector = PersonWristDetector('yolo11n-pose.pt')
     
     # Initialize video capture
-    cap = cv2.VideoCapture("Graduation_Project\\vision\\tracking\\Videos\\Security_camera.mp4")
+    
+    # cap = cv2.VideoCapture("Graduation_Project\\vision\\tracking\\Videos\\Security_camera.mp4")
+    cap = cv2.VideoCapture(r"D:\Graduation_Project\vision\tracking\Videos\Security_camera.mp4")
+
+    #cap = cv2.VideoCapture(0)  # Use webcam
     
     if not cap.isOpened():
         print("Error: Could not open webcam")

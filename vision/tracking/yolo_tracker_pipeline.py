@@ -151,7 +151,8 @@ class PersonTrackingPipeline:
         print(datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-5])
         print("="*60)
         
-        self.cap = cv2.VideoCapture(src)
+        # self.cap = cv2.VideoCapture(src)
+        self.cap = cv2.VideoCapture(r"D:\Graduation_Project\vision\tracking\Videos\Security_camera.mp4")
         self.device = device
 
         self.detector = YOLODetector(device=self.device)
