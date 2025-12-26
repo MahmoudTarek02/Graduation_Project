@@ -9,6 +9,7 @@ from torchvision.models.detection import (
 )
 from reid import REID
 import operator
+import time
 
 
 # Set device
@@ -42,6 +43,7 @@ feats = dict() # features for each ID for every image in images_by_id
 
 with torch.inference_mode():
     while True:
+        t1 = time.time()
         success, frame = cap.read()
         if not success:
             break
@@ -137,7 +139,7 @@ with torch.inference_mode():
         tracker.plot_results(displayed, show_trajectories=True)
 
         # Show output
-
+        print(f"FPS = {1/(time.time() - t1):.2f}")
         cv2.imshow('BoXMOT + Torchvision', displayed)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
