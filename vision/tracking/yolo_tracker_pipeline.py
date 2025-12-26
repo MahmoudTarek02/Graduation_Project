@@ -7,7 +7,7 @@ from pathlib import Path
 from reid import REID
 import operator
 from datetime import datetime
-
+import time
 
 # MAIN PIPELINE 
 class YOLODetector:
@@ -180,6 +180,7 @@ class PersonTrackingPipeline:
         with torch.inference_mode():
             frame_count = 0
             while True:
+                t1 = time.time()
                 ok, frame = self.cap.read()
                 if not ok:
                     print("\nEnd of video stream")
@@ -187,7 +188,9 @@ class PersonTrackingPipeline:
 
                 disp, fuse = self.process_frame(frame)
                 frame_count += 1
-
+                t2 = time.time()
+                fps = 1 / (t2 - t1)
+                print(f"Frame: {frame_count}, FPS: {fps:.2f}", end='\r')
                 cv2.imshow("YOLO + ByteTrack + ReID", disp)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print(f"\nUser quit after {frame_count} frames")
