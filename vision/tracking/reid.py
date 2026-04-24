@@ -27,6 +27,13 @@ class REID:
         self.dist_metric = 'euclidean'
         self.model.eval()
 
+        if True:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+            print(f"Total parameters: {total_params:,}")
+            print(f"Trainable parameters: {trainable_params:,}")
+
     def _extract_features(self, input):
         self.model.eval()
         return self.model(input)
