@@ -3,16 +3,17 @@ import torch
 import numpy as np
 from ultralytics import YOLO
 from boxmot import ByteTrack
-from pathlib import Path
 from reid import REID
 import operator
 from datetime import datetime
 import time
+from collections import defaultdict
 
 # ── New imports ────────────────────────────────────────────────────────────────
 from hand_tracker import MediaPipeHandTracker   # swap this class to change model
 from shelf_zone_selector import ShelfZoneSelector
 from shelf_event_detector import ShelfEventDetector
+from shelf_checkout import ShelfItemMonitor, ShelfVideoResolver
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -136,7 +137,7 @@ class ReIDManager:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PersonTrackingPipeline:
-    def __init__(self, src=0):
+    def __init__(self, src=0, shelf_model_path: str | None = None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
         print(datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-5])
@@ -150,6 +151,10 @@ class PersonTrackingPipeline:
         self.detector    = YOLODetector(device=self.device)
         self.tracker     = TrackerWrapper(device=self.device)
         self.reid_manager = ReIDManager()
+        self.person_carts = defaultdict(lambda: defaultdict(int))
+        self.shelf_video_resolver = ShelfVideoResolver(videos_dir="Videos")
+        self.shelf_item_monitor = ShelfItemMonitor(model_path=shelf_model_path)
+        self.processed_shelf_events = set()
 
         # ── Shelf zone setup ───────────────────────────────────────────────────
         # Read first frame for the zone-drawing GUI
@@ -175,9 +180,6 @@ class PersonTrackingPipeline:
             person_bbox_expand=0.5,
         )
 
-        # Register any additional callbacks here:
-        # self.shelf_detector.register_callback(self._on_shelf_event)
-
         # Rewind so the first frame is processed again
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
@@ -185,17 +187,54 @@ class PersonTrackingPipeline:
         print("Pipeline initialization complete!")
         print("=" * 60)
 
-    # ── Optional callback example ──────────────────────────────────────────────
-    def _on_shelf_event(self, event: dict):
-        """
-        Placeholder — replace with a real function call later.
-        event keys: person_id, zone_id, handedness, position, type
-        """
-        print(
-            f"[CALLBACK] Person {event['person_id']} touched "
-            f"Shelf {event['zone_id']} with their {event['handedness']} hand."
+    def _handle_shelf_event(self, event: dict):
+        person_id = event.get("person_id")
+        if person_id is None:
+            print(
+                f"[PIPELINE] Skipping shelf {event['zone_id']} because the hand "
+                "could not be matched to a tracked person."
+            )
+            return
+
+        event_key = (
+            person_id,
+            event.get("zone_id"),
+            event.get("handedness"),
+            event.get("position"),
         )
-        # TODO: api_call(person_id=event['person_id'], shelf=event['zone_id'])
+        if event_key in self.processed_shelf_events:
+            return
+
+        self.processed_shelf_events.add(event_key)
+
+        print(
+            f"\n[PIPELINE] Pausing to inspect shelf {event['zone_id']} "
+            f"for person {event['person_id']}."
+        )
+        shelf_video = self.shelf_video_resolver.resolve(event)
+        if not shelf_video:
+            print("[PIPELINE] Shelf-video selection skipped.")
+            return
+
+        try:
+            result = self.shelf_item_monitor.analyze_video(shelf_video)
+        except Exception as exc:
+            self.processed_shelf_events.discard(event_key)
+            print(f"[PIPELINE] Shelf analysis failed: {exc}")
+            return
+
+        if not result.counts:
+            print(
+                f"[PIPELINE] No taken items detected in shelf video: {result.video_path}"
+            )
+            return
+
+        for class_name, qty in result.counts.items():
+            self.person_carts[person_id][class_name] += qty
+
+        print(f"[PIPELINE] Cart updated for person {person_id}:")
+        for class_name, qty in sorted(self.person_carts[person_id].items()):
+            print(f"  {qty}x {class_name}")
 
     # ── Frame processing ───────────────────────────────────────────────────────
     def process_frame(self, frame):
@@ -229,6 +268,8 @@ class PersonTrackingPipeline:
 
                 disp, fuse, events = self.process_frame(frame)
                 all_events.extend(events)
+                for event in events:
+                    self._handle_shelf_event(event)
 
                 frame_count += 1
                 fps = 1 / (time.time() - t1)
@@ -252,11 +293,19 @@ class PersonTrackingPipeline:
                 f"  Person {ev['person_id']} ({ev['handedness']}) → "
                 f"Shelf {ev['zone_id']} at {ev['position']}"
             )
+        if self.person_carts:
+            print("\nDetected carts:")
+            for person_id in sorted(self.person_carts, key=str):
+                cart = self.person_carts[person_id]
+                items = ", ".join(
+                    f"{qty}x {name}" for name, qty in sorted(cart.items())
+                ) or "empty"
+                print(f"  Person {person_id}: {items}")
         print("=" * 60)
 
 
 if __name__ == "__main__":
     pipeline = PersonTrackingPipeline(
-        src=r"C:\Users\omara\OneDrive - Alexandria University\Desktop\College\grad_project\Graduation_Project\vision\tracking\Videos\video_top.mp4"
-        )
+        src=r"C:\Users\omara\OneDrive - Alexandria University\Desktop\College\grad_project\Final\Videos\video_back.mp4"
+    )
     pipeline.start()

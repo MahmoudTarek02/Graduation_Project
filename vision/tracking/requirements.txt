@@ -17,3 +17,5 @@ torch
 torchvision
 boxmot
 ultralytics
+mediapipe
+torchreid
