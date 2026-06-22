@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,10 +21,12 @@ from config import (
     SHELF_ITEM_CONFIDENCE_THRESHOLD,
     SHELF_LIVE_BUFFER_FLUSH_FRAMES,
     SHELF_POSE_CONFIDENCE_THRESHOLD,
+    SHELF_POST_HAND_ABSENT_FRAMES,
     SHELF_REID_IOU_THRESHOLD,
     SHELF_REID_MAX_DIST,
     SHELF_REID_WINDOW_FRAMES,
     SHELF_SHOW_PREVIEW,
+    SHELF_SLOT_REAPPEAR_WINDOW_FRAMES,
     SHELF_STABLE_FRAMES,
 )
 
@@ -126,6 +128,8 @@ class ShelfItemMonitor:
         reid_window_frames = SHELF_REID_WINDOW_FRAMES
         reid_iou_threshold = SHELF_REID_IOU_THRESHOLD
         reid_max_dist = SHELF_REID_MAX_DIST
+        post_hand_absent_frames = SHELF_POST_HAND_ABSENT_FRAMES
+        reappear_window_frames = SHELF_SLOT_REAPPEAR_WINDOW_FRAMES
 
         if isinstance(source, int):
             fps = cap.get(cv2.CAP_PROP_FPS)
@@ -135,15 +139,16 @@ class ShelfItemMonitor:
             stable_frames = 8
             disappear_threshold = max(8, int(fps * 0.75))
             reid_window_frames = max(disappear_threshold * 2, int(fps * 2.0))
+            post_hand_absent_frames = max(6, int(fps * 0.35))
+            reappear_window_frames = max(disappear_threshold * 2, int(fps * 2.5))
 
             for _ in range(SHELF_LIVE_BUFFER_FLUSH_FRAMES):
                 ok, _ = cap.read()
                 if not ok:
                     break
 
-        shelf_items: dict[int, dict] = {}
-        disappeared: defaultdict[int, int] = defaultdict(int)
-        reid_candidates: dict[int, dict] = {}
+        shelf_slots: dict[int, dict] = {}
+        next_slot_id = 1
         taken_events: list[dict] = []
 
         frame_idx = 0
@@ -158,8 +163,6 @@ class ShelfItemMonitor:
             people = self._detect_people_and_hands(frame)
             detections = self._detect_items(frame)
             tracks = tracker.update(detections, frame)
-            active_ids = set()
-
             if self.show_preview:
                 preview = frame.copy()
                 self._draw_preview_overlay(
@@ -169,10 +172,11 @@ class ShelfItemMonitor:
                     frame_limit=frame_limit,
                 )
                 self._draw_people(preview, people)
-                self._draw_tracks(preview, tracks, shelf_items, frame_idx)
+                self._draw_tracks(preview, tracks, shelf_slots, frame_idx)
                 cv2.imshow(f"Shelf Live Preview - source {source_label}", preview)
                 cv2.waitKey(1)
 
+            observed_slots = set()
             for row in tracks if tracks is not None else []:
                 x1, y1, x2, y2 = map(int, row[:4])
                 track_id = int(row[4])
@@ -182,103 +186,110 @@ class ShelfItemMonitor:
                 box = (x1, y1, x2, y2)
                 cx, cy = self._box_center(box)
 
-                active_ids.add(track_id)
+                slot_id = self._find_slot_match(
+                    class_name=class_name,
+                    box=box,
+                    frame_idx=frame_idx,
+                    shelf_slots=shelf_slots,
+                    blocked_slot_ids=observed_slots,
+                    reappear_window_frames=reappear_window_frames,
+                    reid_max_dist=reid_max_dist,
+                    reid_iou_threshold=reid_iou_threshold,
+                )
 
-                if track_id not in shelf_items:
-                    matched_id = self._find_reid_match(
-                        class_name=class_name,
-                        box=box,
-                        frame_idx=frame_idx,
-                        reid_candidates=reid_candidates,
-                        reid_window_frames=reid_window_frames,
-                        reid_max_dist=reid_max_dist,
-                        reid_iou_threshold=reid_iou_threshold,
-                    )
-                    if matched_id is not None:
-                        old_entry = shelf_items.pop(matched_id, None)
-                        if old_entry:
-                            shelf_items[track_id] = old_entry
-                            shelf_items[track_id]["reappeared"] = True
-                        else:
-                            shelf_items[track_id] = {
-                                "class_name": class_name,
-                                "stable_count": stable_frames,
-                                "status": "stable",
-                                "last_touch": None,
-                            }
-                        reid_candidates.pop(matched_id, None)
-                        disappeared[track_id] = 0
-                    else:
-                        shelf_items[track_id] = {
-                            "class_name": class_name,
-                            "stable_count": 1,
-                            "status": "new",
-                            "last_touch": None,
-                        }
+                if slot_id is None:
+                    slot_id = next_slot_id
+                    next_slot_id += 1
+                    shelf_slots[slot_id] = {
+                        "slot_id": slot_id,
+                        "class_name": class_name,
+                        "stable_count": 1,
+                        "status": "new",
+                        "home_box": box,
+                        "last_box": box,
+                        "cx": cx,
+                        "cy": cy,
+                        "last_conf": conf,
+                        "last_seen_frame": frame_idx,
+                        "last_touch": None,
+                        "missing_since": None,
+                        "hand_left_frame": None,
+                        "active_track_id": track_id,
+                    }
                 else:
-                    item = shelf_items[track_id]
-                    item["stable_count"] += 1
-                    if item["status"] == "new" and item["stable_count"] >= stable_frames:
-                        item["status"] = "stable"
+                    slot = shelf_slots[slot_id]
+                    slot["stable_count"] += 1
+                    if slot["status"] == "new" and slot["stable_count"] >= stable_frames:
+                        slot["status"] = "visible"
+                    elif slot["status"] in {"occluded", "missing"}:
+                        slot["status"] = "visible"
 
-                shelf_items[track_id]["last_box"] = box
-                shelf_items[track_id]["cx"] = cx
-                shelf_items[track_id]["cy"] = cy
-                shelf_items[track_id]["last_conf"] = conf
-                disappeared[track_id] = 0
+                    slot["home_box"] = self._blend_box(slot.get("home_box", box), box)
+                    slot["last_box"] = box
+                    slot["cx"] = cx
+                    slot["cy"] = cy
+                    slot["last_conf"] = conf
+                    slot["last_seen_frame"] = frame_idx
+                    slot["missing_since"] = None
+                    slot["hand_left_frame"] = None
+                    slot["active_track_id"] = track_id
 
-                best_touch = None
-                for person in people:
-                    for hand in person["hands"]:
-                        distance = self._point_to_box_distance(hand["wrist"], box)
-                        if distance > self.hand_touch_margin:
-                            continue
-
-                        candidate = {
-                            "frame_idx": frame_idx,
-                            "distance": distance,
-                            "actor_side": person["actor_side"],
-                            "person_label": person["person_label"],
-                            "handedness": hand["handedness"],
-                            "wrist": hand["wrist"],
-                        }
-                        if best_touch is None or candidate["distance"] < best_touch["distance"]:
-                            best_touch = candidate
-
+                observed_slots.add(slot_id)
+                best_touch = self._find_best_touch(people, box, frame_idx)
                 if best_touch is not None:
-                    shelf_items[track_id]["last_touch"] = best_touch
+                    shelf_slots[slot_id]["last_touch"] = best_touch
 
-            for track_id, item in list(shelf_items.items()):
-                if track_id in active_ids:
+            for slot_id, slot in list(shelf_slots.items()):
+                if slot_id in observed_slots:
+                    continue
+                if slot["status"] == "new":
+                    if frame_idx - slot.get("last_seen_frame", frame_idx) > stable_frames:
+                        shelf_slots.pop(slot_id, None)
                     continue
 
-                disappeared[track_id] += 1
+                last_box = slot.get("last_box", slot.get("home_box", (0, 0, 0, 0)))
+                current_touch = self._find_best_touch(people, last_box, frame_idx)
+                if current_touch is not None:
+                    slot["status"] = "occluded"
+                    slot["last_touch"] = current_touch
+                    slot["missing_since"] = slot.get("missing_since") or frame_idx
+                    slot["hand_left_frame"] = None
+                    continue
 
-                if item["status"] == "stable" and track_id not in reid_candidates:
-                    reid_candidates[track_id] = {
-                        "class_name": item["class_name"],
-                        "last_box": item.get("last_box", (0, 0, 0, 0)),
-                        "cx": item.get("cx", 0),
-                        "cy": item.get("cy", 0),
-                        "lost_frame": frame_idx,
-                    }
+                if slot["status"] == "occluded":
+                    slot["status"] = "missing"
+                    slot["hand_left_frame"] = frame_idx
+                    slot["missing_since"] = slot.get("missing_since") or frame_idx
+                elif slot["status"] == "visible":
+                    slot["status"] = "missing"
+                    slot["missing_since"] = frame_idx
+                    slot["hand_left_frame"] = frame_idx
 
-                if item["status"] == "stable" and disappeared[track_id] >= disappear_threshold:
-                    item["status"] = "taken"
-                    reid_candidates.pop(track_id, None)
-                    touch = item.get("last_touch")
+                touch = slot.get("last_touch")
+                hand_left_frame = slot.get("hand_left_frame")
+                missing_since = slot.get("missing_since", frame_idx)
 
+                if (
+                    touch is not None
+                    and hand_left_frame is not None
+                    and frame_idx - hand_left_frame >= post_hand_absent_frames
+                    and frame_idx - missing_since >= post_hand_absent_frames
+                ):
+                    slot["status"] = "taken"
                     taken_events.append(
                         {
-                            "class_name": item["class_name"],
-                            "track_id": track_id,
+                            "class_name": slot["class_name"],
+                            "slot_id": slot_id,
+                            "track_id": slot.get("active_track_id"),
                             "frame_taken": frame_idx,
-                            "actor_side": touch["actor_side"] if touch else "unknown-side",
-                            "person_label": touch["person_label"] if touch else "unknown-person",
-                            "handedness": touch["handedness"] if touch else "unknown-hand",
+                            "actor_side": touch["actor_side"],
+                            "person_label": touch["person_label"],
+                            "handedness": touch["handedness"],
                         }
                     )
-                    shelf_items.pop(track_id, None)
+                    shelf_slots.pop(slot_id, None)
+                elif frame_idx - missing_since > max(disappear_threshold, reid_window_frames):
+                    shelf_slots.pop(slot_id, None)
 
             frame_idx += 1
 
@@ -387,7 +398,7 @@ class ShelfItemMonitor:
 
         return people
 
-    def _draw_tracks(self, frame: np.ndarray, tracks, shelf_items: dict, frame_idx: int) -> None:
+    def _draw_tracks(self, frame: np.ndarray, tracks, shelf_slots: dict, frame_idx: int) -> None:
         if tracks is None:
             return
 
@@ -396,7 +407,10 @@ class ShelfItemMonitor:
             track_id = int(row[4])
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 210, 80), 2)
             text = f"ID {track_id}"
-            touch = shelf_items.get(track_id, {}).get("last_touch")
+            slot = self._slot_for_track(shelf_slots, track_id)
+            if slot is not None:
+                text += f" slot {slot['slot_id']} {slot['status']}"
+            touch = slot.get("last_touch") if slot is not None else None
             if touch is not None and frame_idx - touch["frame_idx"] <= self.hand_touch_ttl_frames:
                 text += f" {touch['person_label']} {touch['handedness']}"
             cv2.putText(
@@ -495,33 +509,79 @@ class ShelfItemMonitor:
         dy = max(y1 - py, 0, py - y2)
         return float(np.hypot(dx, dy))
 
-    def _find_reid_match(
+    def _find_best_touch(self, people: list[dict], box: tuple, frame_idx: int) -> dict | None:
+        best_touch = None
+        for person in people:
+            for hand in person["hands"]:
+                distance = self._point_to_box_distance(hand["wrist"], box)
+                if distance > self.hand_touch_margin:
+                    continue
+
+                candidate = {
+                    "frame_idx": frame_idx,
+                    "distance": distance,
+                    "actor_side": person["actor_side"],
+                    "person_label": person["person_label"],
+                    "handedness": hand["handedness"],
+                    "wrist": hand["wrist"],
+                }
+                if best_touch is None or candidate["distance"] < best_touch["distance"]:
+                    best_touch = candidate
+
+        return best_touch
+
+    def _find_slot_match(
         self,
         class_name: str,
         box: tuple,
         frame_idx: int,
-        reid_candidates: dict,
-        reid_window_frames: int,
+        shelf_slots: dict,
+        blocked_slot_ids: set,
+        reappear_window_frames: int,
         reid_max_dist: int,
         reid_iou_threshold: float,
     ) -> int | None:
         cx, cy = self._box_center(box)
-        best_id, best_score = None, -1.0
+        best_slot_id, best_score = None, -1.0
 
-        for tid, cand in reid_candidates.items():
-            if cand["class_name"] != class_name:
+        for slot_id, slot in shelf_slots.items():
+            if slot_id in blocked_slot_ids:
                 continue
-            if frame_idx - cand["lost_frame"] > reid_window_frames:
+            if slot["class_name"] != class_name:
                 continue
 
-            dist = np.hypot(cx - cand["cx"], cy - cand["cy"])
-            iou = self._box_iou(box, cand["last_box"])
+            missing_since = slot.get("missing_since")
+            if missing_since is not None and frame_idx - missing_since > reappear_window_frames:
+                continue
+
+            reference_box = slot.get("last_box", slot.get("home_box"))
+            if reference_box is None:
+                continue
+
+            sx, sy = self._box_center(reference_box)
+            dist = np.hypot(cx - sx, cy - sy)
+            iou = self._box_iou(box, reference_box)
             if dist > reid_max_dist and iou < reid_iou_threshold:
                 continue
 
-            score = iou - (dist / (reid_max_dist * 4))
+            status_bonus = 0.2 if slot["status"] in {"occluded", "missing"} else 0.0
+            score = iou + status_bonus - (dist / max(reid_max_dist * 4, 1))
             if score > best_score:
                 best_score = score
-                best_id = tid
+                best_slot_id = slot_id
 
-        return best_id
+        return best_slot_id
+
+    @staticmethod
+    def _blend_box(old_box, new_box, alpha: float = 0.9):
+        return tuple(
+            int(round(alpha * old + (1 - alpha) * new))
+            for old, new in zip(old_box, new_box)
+        )
+
+    @staticmethod
+    def _slot_for_track(shelf_slots: dict, track_id: int) -> dict | None:
+        for slot in shelf_slots.values():
+            if slot.get("active_track_id") == track_id:
+                return slot
+        return None

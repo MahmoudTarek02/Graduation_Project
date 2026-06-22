@@ -49,6 +49,12 @@ SHELF_STABLE_FRAMES = 15
 # Number of frames a stable item can disappear before it is marked as taken in offline/video mode.
 SHELF_DISAPPEAR_THRESHOLD = 90
 
+# Number of clean frames after a hand leaves an occupied slot before confirming a take.
+SHELF_POST_HAND_ABSENT_FRAMES = 12
+
+# Number of frames an occluded/missing slot can wait for the same product to reappear.
+SHELF_SLOT_REAPPEAR_WINDOW_FRAMES = 75
+
 # Number of frames a disappeared item stays eligible for shelf-side re-identification in offline/video mode.
 SHELF_REID_WINDOW_FRAMES = 10
 
