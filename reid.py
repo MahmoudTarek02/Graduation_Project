@@ -1,8 +1,16 @@
-from torchreid.data.transforms import build_transforms
+import os
+from pathlib import Path
+
+_CACHE_ROOT = Path("/tmp/codex_retail_tracking_cache")
+os.environ.setdefault("TORCH_HOME", str(_CACHE_ROOT / "torch"))
+os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT / "xdg"))
+os.environ.setdefault("MPLCONFIGDIR", str(_CACHE_ROOT / "mpl"))
+
 from PIL import Image
-import torchreid
 import torch
+import torchreid
 from torchreid import metrics
+from torchreid.data.transforms import build_transforms
 
 from config import (
     REID_DISTANCE_METRIC,
@@ -19,8 +27,8 @@ class REID:
         self.model = torchreid.models.build_model(
             name=REID_MODEL_NAME,
             num_classes=1,  # human
-            loss='softmax',
-            pretrained=True,
+            loss="softmax",
+            pretrained=False,
             use_gpu=self.use_gpu
         )
         torchreid.utils.load_pretrained_weights(self.model, REID_WEIGHTS_PATH)

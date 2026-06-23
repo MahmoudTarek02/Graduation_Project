@@ -1,0 +1,72 @@
+prompt 
+ I'm rebuilding part of a retail tracking repo. The OLD design used a
+  single back camera with continuous person tracking — that code has been
+  removed.
+
+  THE NEW DESIGN has 3 cameras:
+  1. Entrance camera — enrolls each shopper into an identity gallery using
+     body-appearance re-identification (OSNet embeddings)
+  2. Item-facing shelf camera — runs continuously, detects when an item is
+     taken, fires a take event
+  3. Forward-facing shelf camera — triggered ONLY when a take event fires,
+     captures a short burst of frames, detects people, and matches against
+     the identity gallery to assign the item to a person
+
+  PERSON DISAMBIGUATION RULE (important):
+  - If 1 person detected in forward camera frame → match directly against
+    gallery, skip pose estimation
+  - If 2+ people detected → run pose estimation, find who raised/extended
+    their arm toward the shelf, match only that person against the gallery
+
+  Reusable existing code:
+  - reid.py: wraps OSNet x0_25 via torchreid, loaded from
+    osnet_x0_25_msmt1.pth. REID()._feature(img) takes one cropped person
+    image (numpy array) and returns a single embedding tensor.
+    REID().compute_distance(qf, gf) computes a distance matrix between
+    embedding tensors.
+  - config.py: contains all model paths and thresholds. Always import
+    constants from here rather than hardcoding values. Never hardcode
+    paths, numbers, or thresholds directly in code.
+
+  YOLODetector pattern to follow for person detection:
+  - Load ultralytics YOLO with yolov8n.pt
+  - Run inference on a frame
+  - Filter to person class 0 only
+  - Return boxes as [x1, y1, x2, y2, conf, cls]
+
+  Read reid.py and config.py first and confirm you understand both files
+  and the full system design before I give you the first task.
+
+
+
+• I understand the current design and the two files.
+
+  reid.py:
+
+  - REID wraps torchreid OSNet using constants from config.py.
+  - Model name: REID_MODEL_NAME, weights: REID_WEIGHTS_PATH.
+  - _feature(img) accepts one cropped person image as a NumPy array and returns one CPU embedding tensor.
+  - _features(imgs) batches multiple cropped images into one tensor.
+  - compute_distance(qf, gf) delegates to torchreid.metrics.compute_distance_matrix(...) using REID_DISTANCE_METRIC, returning a NumPy distance matrix.
+  - Any matching logic should compare distances against REID_MATCH_THRESHOLD from config.py, not a hardcoded value.
+
+  config.py:
+
+  - Contains all relevant paths, thresholds, frame counts, and pose keypoint indices.
+  - Person detectors should use ENTRANCE_DETECTOR_MODEL_PATH or FORWARD_DETECTOR_MODEL_PATH, both currently yolov8n.pt.
+  - Entrance enrollment uses ENTRANCE_MIN_DETECTION_CONFIDENCE and ENTRANCE_ENROLLMENT_FRAMES.
+  - Forward camera burst/pose behavior uses FORWARD_CAPTURE_BURST_FRAMES, FORWARD_POSE_MODEL_PATH, and FORWARD_POSE_CONFIDENCE_THRESHOLD.
+  - Shelf/item camera behavior uses the SHELF_* constants.
+  - Pose keypoints are COCO indices from config.
+
+  System design understood:
+
+  - Entrance camera builds an identity gallery from body appearance embeddings.
+  - Item-facing camera continuously detects item take events.
+  - Forward-facing camera only activates after a take event, captures a short burst, detects people, then assigns the item.
+  - If exactly one person is detected, match that crop directly with ReID and skip pose.
+  - If multiple people are detected, run pose estimation, choose the person whose arm is raised/extended toward the shelf, then match only that person against
+    the gallery.
+
+  - I’ll follow the YOLODetector pattern: load Ultralytics YOLO, infer on frames, filter class 0 person detections, return [x1, y1, x2, y2, conf, cls].
+  - I’ll import all paths, thresholds, model names, and numeric constants from config.py; no hardcoded thresholds or model paths.
