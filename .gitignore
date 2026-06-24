@@ -16,3 +16,4 @@ vision/tracking/hand_landmarker.task
 /vision/tracking/__pycache__
 *.pyc
 *.pyc
+*.pt
