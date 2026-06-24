@@ -270,6 +270,14 @@ class ReIDManager:
         # print(f"Current ID fusion: {self.final_fuse_id}")
         return self.final_fuse_id
 
+    def resolve_id(self, tid: int | None) -> int | None:
+        if tid is None:
+            return None
+        for master, group in self.final_fuse_id.items():
+            if tid == master or tid in group:
+                return master
+        return tid
+
 
 class CameraSelector:
     WINDOW_NAME = "Camera Preview - Y: select, N: next, Q: quit"
@@ -423,6 +431,47 @@ class PersonTrackingPipeline:
         print("Pipeline initialization complete!")
         print("=" * 60)
 
+    def _canonical_person_id(self, person_id: int | None) -> int | None:
+        return self.reid_manager.resolve_id(person_id)
+
+    def _merge_cart_ids(self, source_id: int, target_id: int) -> None:
+        if source_id == target_id or source_id not in self.person_carts:
+            return
+
+        source_cart = self.person_carts.pop(source_id)
+        target_cart = self.person_carts[target_id]
+        for class_name, qty in source_cart.items():
+            target_cart[class_name] += qty
+
+        print(f"[PIPELINE] Merged cart from person {source_id} into person {target_id}.")
+
+    def _normalize_person_state(self) -> None:
+        for master, group in list(self.reid_manager.final_fuse_id.items()):
+            for alias_id in list(group):
+                if alias_id != master:
+                    self._merge_cart_ids(alias_id, master)
+
+        rebuilt_pending = set()
+        for meta in self.pending_request_meta.values():
+            canonical_id = self._canonical_person_id(meta.get("person_id"))
+            if canonical_id is None:
+                continue
+
+            old_event_key = meta.get("event_key")
+            if old_event_key is None:
+                continue
+
+            new_event_key = (
+                canonical_id,
+                old_event_key[1],
+                old_event_key[2],
+            )
+            meta["person_id"] = canonical_id
+            meta["event_key"] = new_event_key
+            rebuilt_pending.add(new_event_key)
+
+        self.pending_shelf_requests = rebuilt_pending
+
     def _assign_shelf_cameras(self, zones: dict):
         if not zones:
             print("[Pipeline] No shelf zones were defined, so no shelf cameras were assigned.")
@@ -454,13 +503,15 @@ class PersonTrackingPipeline:
             self.shelf_workers[str(source)] = worker
 
     def _handle_shelf_event(self, event: dict):
-        person_id = event.get("person_id")
+        person_id = self._canonical_person_id(event.get("person_id"))
         if person_id is None:
             print(
                 f"[PIPELINE] Skipping shelf {event['zone_id']} because the hand "
                 "could not be matched to a tracked person."
             )
             return
+        event = dict(event)
+        event["person_id"] = person_id
 
         event_key = (
             person_id,
@@ -586,7 +637,12 @@ class PersonTrackingPipeline:
                 print(f"[PIPELINE] Shelf-side counts: {actor_counts}")
                 continue
 
-            person_id = meta["person_id"]
+            self._normalize_person_state()
+            person_id = self._canonical_person_id(meta["person_id"])
+            if person_id is None:
+                print("[PIPELINE] Skipping cart update because the person ID is no longer valid.")
+                continue
+
             for item_event in matched_events:
                 class_name = item_event["class_name"]
                 self.person_carts[person_id][class_name] += 1
@@ -613,6 +669,7 @@ class PersonTrackingPipeline:
         detections = self.detector.detect(frame)
         tracks     = self.tracker.update(detections, frame)
         fuse       = self.reid_manager.process(tracks, frame)
+        self._normalize_person_state()
 
         # Draw ByteTrack trajectories first, then shelf overlay on top
         self.tracker.draw(frame)
