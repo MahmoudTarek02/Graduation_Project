@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 import numpy as np
-from boxmot import ByteTrack
 from ultralytics import YOLO
+from boxmot.trackers.bbox.bytetrack.bytetrack import ByteTrack
 
 from config import (
     DEFAULT_LIVE_CAMERA_FPS,
@@ -114,6 +115,13 @@ class ShelfItemMonitor:
             print(f"[ShelfItemMonitor] prepared shelf source: {session.source_label}")
 
     def analyze_source(self, source: int | str | Path) -> ShelfInteractionResult:
+        return self.process_source(source)
+
+    def process_source(
+        self,
+        source: int | str | Path,
+        on_take_event: Callable[[dict], None] | None = None,
+    ) -> ShelfInteractionResult:
         self._ensure_models()
         session = self._get_or_create_session(source)
         cap = session.cap
@@ -268,16 +276,17 @@ class ShelfItemMonitor:
                     reid_candidates.pop(track_id, None)
                     touch = item.get("last_touch")
 
-                    taken_events.append(
-                        {
-                            "class_name": item["class_name"],
-                            "track_id": track_id,
-                            "frame_taken": frame_idx,
-                            "actor_side": touch["actor_side"] if touch else "unknown-side",
-                            "person_label": touch["person_label"] if touch else "unknown-person",
-                            "handedness": touch["handedness"] if touch else "unknown-hand",
-                        }
-                    )
+                    event = {
+                        "class_name": item["class_name"],
+                        "track_id": track_id,
+                        "frame_taken": frame_idx,
+                        "actor_side": touch["actor_side"] if touch else "unknown-side",
+                        "person_label": touch["person_label"] if touch else "unknown-person",
+                        "handedness": touch["handedness"] if touch else "unknown-hand",
+                    }
+                    taken_events.append(event)
+                    if on_take_event is not None:
+                        on_take_event(event)
                     shelf_items.pop(track_id, None)
 
             frame_idx += 1
