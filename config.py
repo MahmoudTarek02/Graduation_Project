@@ -5,7 +5,7 @@ from pathlib import Path
 BACK_DETECTOR_MODEL_PATH = "yolov8n.pt"
 
 # Shelf item detector model path used to recognize products on the shelf.
-SHELF_ITEM_MODEL_PATH = "my_model.pt"
+SHELF_ITEM_MODEL_PATH = "my_model_new.pt"
 
 # Pose model path used on shelf cameras to estimate wrists for multi-person attribution.
 SHELF_POSE_MODEL_PATH = "yolo26s-pose.pt"
