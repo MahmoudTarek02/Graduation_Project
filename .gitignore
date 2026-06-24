@@ -17,3 +17,4 @@ vision/tracking/hand_landmarker.task
 *.pyc
 *.pyc
 *.pt
+*.pth
