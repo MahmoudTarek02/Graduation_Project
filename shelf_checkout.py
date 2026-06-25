@@ -96,12 +96,14 @@ class ShelfItemMonitor:
         source: int | str | Path,
         trigger_event: dict | None = None,
         actor_side_hint: str = "unknown-side",
+        zone_presence: dict | None = None,
     ) -> ShelfInteractionResult:
         self._ensure_models()
         self._ensure_hand_tracker()
         session = self._get_or_create_session(source)
         cap = session.cap
         source_label = session.source_label
+        zone_id = trigger_event.get("zone_id") if trigger_event else None
 
         if isinstance(source, int):
             for _ in range(SHELF_LIVE_BUFFER_FLUSH_FRAMES):
@@ -115,7 +117,7 @@ class ShelfItemMonitor:
 
         # Min and max frames to process dynamically
         min_frames = max(30, self.live_analysis_frames // 2)
-        max_frames = max(120, self.live_analysis_frames * 2)
+        max_frames = max(450, self.live_analysis_frames * 8)
 
         frame_idx = 0
         while cap is not None and cap.isOpened():
@@ -137,6 +139,11 @@ class ShelfItemMonitor:
             hands = self._hand_tracker.detect(frame)
             hand_present = len(hands) > 0
 
+            # Check shopper presence
+            shopper_present = True
+            if zone_presence is not None and zone_id is not None:
+                shopper_present = zone_presence.get(zone_id, False)
+
             # Check stability of counts
             counts_stable = len(stable_count_history) == settle_window and all(
                 h == stable_count_history[0] for h in list(stable_count_history)[1:]
@@ -144,8 +151,8 @@ class ShelfItemMonitor:
 
             # Exit criteria
             if frame_idx >= min_frames:
-                if not hand_present and counts_stable:
-                    print(f"[ShelfItemMonitor] Settled and hand-free at frame {frame_idx + 1}")
+                if not shopper_present and not hand_present and counts_stable:
+                    print(f"[ShelfItemMonitor] Shopper left, settled and hand-free at frame {frame_idx + 1}")
                     break
                 if frame_idx >= max_frames:
                     print(f"[ShelfItemMonitor] Reached max frame limit ({max_frames}) at frame {frame_idx + 1}")
@@ -154,6 +161,8 @@ class ShelfItemMonitor:
             if self.show_preview:
                 preview = frame.copy()
                 status_text = "Interacting (hand present)" if hand_present else ("Settling..." if not counts_stable else "Stable")
+                if shopper_present and not hand_present:
+                    status_text = "Shopper present (waiting for interaction)"
                 self._draw_preview_overlay(
                     preview=preview,
                     source_label=source_label,

@@ -27,7 +27,6 @@ from config import (
 )
 
 # ── New imports ────────────────────────────────────────────────────────────────
-from hand_tracker import MediaPipeHandTracker   # swap this class to change model
 from shelf_zone_selector import ShelfZoneSelector
 from shelf_event_detector import ShelfEventDetector
 from shelf_checkout import ShelfItemMonitor, ShelfCameraResolver
@@ -49,6 +48,7 @@ def _shelf_analysis_worker_main(
     live_analysis_frames: int,
     task_queue,
     result_queue,
+    zone_presence,
 ):
     monitor = None
     try:
@@ -81,6 +81,7 @@ def _shelf_analysis_worker_main(
                     source,
                     trigger_event=event,
                     actor_side_hint=actor_side_hint,
+                    zone_presence=zone_presence,
                 )
                 result_queue.put(
                     {
@@ -122,6 +123,7 @@ class ShelfAnalysisWorker:
         model_path: str,
         pose_model_path: str,
         live_analysis_frames: int,
+        zone_presence,
     ):
         self.source = source
         self.task_queue = mp_ctx.Queue()
@@ -135,6 +137,7 @@ class ShelfAnalysisWorker:
                 live_analysis_frames,
                 self.task_queue,
                 self.result_queue,
+                zone_presence,
             ),
             daemon=True,
         )
@@ -386,6 +389,7 @@ class PersonTrackingPipeline:
         self.active_shelf_batches = {}
         self.next_shelf_request_id = 1
         self.back_frame_width = None
+        self.zone_presence = self.mp_ctx.Manager().dict()
 
         # ── Shelf zone setup ───────────────────────────────────────────────────
         zone_selector = ShelfZoneSelector()
@@ -398,18 +402,9 @@ class PersonTrackingPipeline:
             zones = zone_selector.select(first_frame)
         self._assign_shelf_cameras(zones)
 
-        # ── Hand tracker (swap MediaPipeHandTracker → your own class here) ─────
-        hand_tracker = MediaPipeHandTracker(
-            max_hands=BACK_HAND_MAX_HANDS,
-            detection_confidence=BACK_HAND_DETECTION_CONFIDENCE,
-            tracking_confidence=BACK_HAND_TRACKING_CONFIDENCE,
-            use_fingertip=BACK_HAND_FINGERTIP,
-        )
-
-        # ── Event detector ─────────────────────────────────────────────────────
+        # ── Event detector (triggered by shopper bounding boxes) ───────────────
         self.shelf_detector = ShelfEventDetector(
             zones=zones,
-            hand_tracker=hand_tracker,
             cooldown_frames=SHELF_EVENT_COOLDOWN_FRAMES,
             person_bbox_expand=SHELF_EVENT_PERSON_BBOX_EXPAND,
         )
@@ -454,6 +449,7 @@ class PersonTrackingPipeline:
                 model_path=self.shelf_model_path,
                 pose_model_path=SHELF_POSE_MODEL_PATH,
                 live_analysis_frames=LIVE_SHELF_ANALYSIS_FRAMES,
+                zone_presence=self.zone_presence,
             )
             worker.start()
             self.shelf_workers[str(source)] = worker
@@ -649,6 +645,15 @@ class PersonTrackingPipeline:
                     break
 
                 disp, fuse, events = self.process_frame(frame)
+                
+                # Update zone presence map for workers
+                for zid in self.shelf_detector._zones:
+                    active = any(
+                        self.shelf_detector._in_zone[(pid, zid)]
+                        for pid in list(fuse.keys())
+                    )
+                    self.zone_presence[zid] = active
+
                 all_events.extend(events)
                 for event in events:
                     self._handle_shelf_event(event)
