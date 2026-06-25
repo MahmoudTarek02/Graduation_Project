@@ -75,8 +75,13 @@ def _shelf_analysis_worker_main(
 
             request_id = task["request_id"]
             event = task["event"]
+            actor_side_hint = task.get("actor_side_hint", "unknown-side")
             try:
-                result = monitor.analyze_source(source)
+                result = monitor.analyze_source(
+                    source,
+                    trigger_event=event,
+                    actor_side_hint=actor_side_hint,
+                )
                 result_queue.put(
                     {
                         "kind": "analysis_result",
@@ -508,6 +513,7 @@ class PersonTrackingPipeline:
                 "kind": "analyze",
                 "request_id": request_id,
                 "event": event,
+                "actor_side_hint": actor_side_hint,
             }
         )
         print(
@@ -589,15 +595,19 @@ class PersonTrackingPipeline:
             person_id = meta["person_id"]
             for item_event in matched_events:
                 class_name = item_event["class_name"]
-                self.person_carts[person_id][class_name] += 1
+                qty = item_event.get("quantity", 1)
+                self.person_carts[person_id][class_name] += qty
+                if self.person_carts[person_id][class_name] <= 0:
+                    del self.person_carts[person_id][class_name]
 
             print(f"[PIPELINE] Cart updated for person {person_id}:")
             for class_name, qty in sorted(self.person_carts[person_id].items()):
                 print(f"  {qty}x {class_name}")
             print(f"[PIPELINE] Matched shelf actor side: {actor_side_hint}")
             for item_event in matched_events:
+                action = "taken" if item_event.get("quantity", 1) > 0 else "returned"
                 print(
-                    f"    {item_event['class_name']} from "
+                    f"    {item_event['class_name']} ({action}) from "
                     f"{item_event['person_label']} {item_event['handedness']}"
                 )
 
