@@ -162,81 +162,62 @@ Answer for phase 2
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 > PROMPT 3
 
 now i want to start phase 3
-  Phase 3 — Item-facing shelf camera
-  Good news: this phase is almost already built. shelf_checkout.py contains the item detection state machine (stable → disappeared → taken) and it's solid.
-  The main change for Phase 3 is converting it from "process a whole video file at once" into "run frame by frame continuously" so it can fire a take event in
-  real time and trigger the forward camera.
-  Before writing the Phase 3 prompt, one question worth thinking about first — do you want to test Phase 3 with:
-  Option A — a recorded video clip of someone taking items off a shelf (you already have videos in your repo)
-  Option B — the actual item-facing camera live
-  Starting with Option A is safer — you can rerun the same clip repeatedly while tuning SHELF_STABLE_FRAMES and SHELF_DISAPPEAR_THRESHOLD without needing the
-  physical camera setup. Once it works on the clip, switching to live is one line change.
+ Build Phase 3: a real-time item detector, in a new file item_detector.py.
+Build it from scratch — do NOT import or wrap shelf_checkout.py, 
+that file belongs to the old design and should be ignored entirely.
 
-  i will test with option A
-  i dont know if shelf_checkout.py is enough or i need another file i want to first test it on a video where when an item is taken it prints in terminal item
-  taken (in the next phases when we integerate everything it will trigger the front facing camera but this will be next phases not now)
+item_detector.py only needs:
+- YOLO loaded with SHELF_ITEM_MODEL_PATH from config.py (my_model_new.pt)
+  for item detection
+- ByteTrack from boxmot for item tracking across frames
+- The stable → disappeared → taken state machine:
+    - an item is "stable" after being tracked for SHELF_STABLE_FRAMES frames
+    - an item is "taken" after being stable and then missing for 
+      SHELF_DISAPPEAR_THRESHOLD frames
+- No pose estimation, no person detection, no ReID, no actor_side
 
-  so i need a file that will take a video from folder test_phase3 to test the item facing camera
+Requirements:
+- class ItemDetector:
+    - __init__(): loads YOLO model and initializes ByteTrack and state
+    - process_frame(frame) → runs one frame through detection and tracking,
+      updates state machine, returns a list of take events fired this frame
+    - register_callback(fn): register a callable that gets called with 
+      each take event dict as it fires
+    - Each take event is a dict:
+        {
+            "class_name": str,   # name of the taken item
+            "track_id": int,     # ByteTrack ID of the taken item
+            "frame_taken": int,  # frame index when taken
+        }
+- always import constants from config.py, never hardcode values
+
+Also write test_item_detector.py that:
+- takes a video file path as a command line argument:
+    .venv/bin/python test_item_detector.py Videos/your_clip.mp4
+- opens the video with cv2.VideoCapture
+- runs process_frame() on every frame
+- draws bounding boxes on tracked items on each frame with the 
+  item class name and track ID as label
+- instead of cv2.imshow, writes annotated frames to an output video
+  file using cv2.VideoWriter saved to Videos/output_test.mp4
+  so it works in a headless Codespaces environment with no display
+- prints to console every time a take event fires:
+    [TAKE] frame=123 class=water_bottle track_id=4
+- at the end prints a summary:
+    Total take events: 3
+    water_bottle x2
+    chips x1
+
+No live camera in this phase — video file only.
+Do not modify shelf_checkout.py.
+Always import constants from config.py, never hardcode values.
 
 
 
-  > ANSWER FOR PROMPT 3
-
-  • I made Phase 3 work as a live-style video test for the shelf camera.
-
-  Changes:
-
-  - In shelf_checkout.py, I added process_source(..., on_take_event=...) so the existing shelf state machine can emit a take event immediately when it happens.
-  - I kept analyze_source() as a thin wrapper so existing code still works.
-  - When the item transitions to taken, the code now builds the event once, appends it to the result list, and calls the callback right away.
-
-  New file:
-
-  - phase3_shelf_video_test.py
-      - finds the first shelf test video in test_phase3/
-      - runs the shelf detector frame by frame
-      - prints item taken in the terminal as soon as the event fires
-      - supports --video <path> for a specific clip
-      - supports --no-preview to disable the OpenCV window
-
-  Config update:
-
-  - config.py
-      - added PHASE3_TEST_VIDEO_GLOBS for the test_phase3/ video lookup patterns
-
-  Validation:
-
-  - I ran a syntax check with .venv/bin/python -m py_compile config.py shelf_checkout.py phase3_shelf_video_test.py
-  - It passed cleanly
-
-  So Phase 3 is now set up to test with a recorded clip in test_phase3/, and it prints the event in the terminal while the video is still being processed.
-
-
-  Note
-  › are you taking in consideration that later in next phasses there a main.py file that will run that will integerate everything all previous phases
 • Yes. I treated Phase 3 as a reusable module, not a dead-end script.
-
-  What that means in practice:
-
-  - shelf_checkout.py still owns the shelf state machine.
-  - I added process_source(..., on_take_event=...) so main.py can reuse the same logic later and attach whatever callback it wants.
-  - analyze_source() still exists, so existing callers won’t break.
-  - The new phase3_shelf_video_test.py is only a test harness for recorded clips in test_phase3/; it does not hardwire the future integration path.
 
   So when main.py arrives in later phases, it can import the existing pieces and wire them together:
 
@@ -245,4 +226,58 @@ now i want to start phase 3
   - forward-camera trigger on take event
   - identity matching
 
-  The only thing I’d tighten in the next phase is defining the event contract cleanly so main.py gets a stable payload from shelf monitoring instead of depending on incidental details.
+
+
+
+• Yes, Phase 4 should be the forward-camera person resolver, and shelf_identity_resolver.py is a reasonable name.
+
+
+  What that phase should do:
+
+  - accept a shelf event from the counting side, including whether it was taken or returned
+  - activate the forward camera only for that event
+  - capture a short burst
+  - detect people
+  - use the 1-person / 2+ people rule
+  - match the selected person against gallery.pkl
+  - return a structured result that links:
+      - shelf event type
+      - matched person ID
+      - confidence/score
+      - frame or camera metadata
+
+  A practical phase order would be:
+
+
+  So yes, you are basically at the point where the next real module is the forward-camera resolver. The full system gets integrated after that, in the orchestration
+  phase.
+
+• Implemented Phase 4.
+
+  What changed:
+
+  - Added [shelf_identity_resolver.py](/workspaces/Graduation_Project/shelf_identity_resolver.py)
+      - Loads gallery.pkl by default
+      - Opens the forward camera or video source
+      - Captures a burst of frames
+      - If 1 person is detected, matches that crop directly against the gallery
+      - If 2+ people are detected, runs pose estimation and picks the person with the strongest reaching/extended-arm heuristic
+      - Returns a structured result that keeps the shelf event type (taken or returned) separate from the person match
+
+  - Added [test_shelf_identity_resolver.py](/workspaces/Graduation_Project/test_shelf_identity_resolver.py)
+      - Runs the resolver on a video file and prints the selected person, score, and selection method
+
+  - Updated [config.py](/workspaces/Graduation_Project/config.py)
+      - Added forward-camera detection and reach-selection thresholds
+
+  - Updated [identity_matcher.py](/workspaces/Graduation_Project/identity_matcher.py)
+      - Forward detector now uses the forward-camera confidence threshold from config
+
+  Validation:
+
+  - py_compile passed for the updated modules
+  - I ran the new resolver test against Videos/vid.mp4; it completed without errors and returned an unresolved result for that clip because no person was detected in
+    the captured burst
+
+  This is wired for the integration model you described: the shelf counter produces taken or returned, and Phase 4 resolves the person against gallery.pkl without re-
+  deciding the shelf action.

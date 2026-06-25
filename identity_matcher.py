@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from config import FORWARD_DETECTOR_MODEL_PATH, REID_MATCH_THRESHOLD
+from config import (
+    FORWARD_DETECTION_CONFIDENCE_THRESHOLD,
+    FORWARD_DETECTOR_MODEL_PATH,
+    REID_MATCH_THRESHOLD,
+)
 from identity_gallery import IdentityGallery, YOLODetector
 
 
@@ -14,7 +18,10 @@ class IdentityMatcher:
         detector: YOLODetector | None = None,
     ):
         self.gallery = gallery
-        self.detector = detector or YOLODetector(model_path=FORWARD_DETECTOR_MODEL_PATH)
+        self.detector = detector or YOLODetector(
+            model_path=FORWARD_DETECTOR_MODEL_PATH,
+            conf_threshold=FORWARD_DETECTION_CONFIDENCE_THRESHOLD,
+        )
 
     def match(self, query_embedding):
         best_person_id = None
