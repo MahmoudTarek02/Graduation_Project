@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -59,11 +60,15 @@ class RetailPipelineOrchestrator:
         forward_source: int | str | Path,
         trigger_event: dict | None = None,
         actor_side_hint: str = "unknown-side",
+        zone_presence: dict | None = None,
+        on_hand_detected: Callable[[dict], None] | None = None,
     ) -> tuple[ShelfInteractionResult, list[PipelineResult]]:
         shelf_result = self.shelf_monitor.analyze_source(
             source=shelf_source,
             trigger_event=trigger_event,
             actor_side_hint=actor_side_hint,
+            zone_presence=zone_presence,
+            on_hand_detected=on_hand_detected,
         )
 
         pipeline_results = [
@@ -89,6 +94,9 @@ class RetailPipelineOrchestrator:
 
     def close(self) -> None:
         self.shelf_monitor.close()
+        close_method = getattr(self.identity_resolver, "close", None)
+        if callable(close_method):
+            close_method()
 
     def _is_inventory_change_event(self, event: dict) -> bool:
         return int(event.get("quantity", 0) or 0) != 0

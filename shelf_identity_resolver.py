@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +50,8 @@ class ShelfIdentityResolutionResult:
 
 
 class ShelfIdentityResolver:
+    PREVIEW_WINDOW_NAME = "Forward Camera Trigger Preview"
+
     def __init__(
         self,
         gallery: IdentityGallery | None = None,
@@ -56,6 +59,8 @@ class ShelfIdentityResolver:
         person_detector: YOLODetector | None = None,
         pose_model: YOLO | None = None,
         capture_burst_frames: int = FORWARD_CAPTURE_BURST_FRAMES,
+        live_frame_provider: Callable[[int | str | Path, int], list[np.ndarray]] | None = None,
+        show_trigger_preview: bool = True,
     ):
         self.gallery = gallery or (matcher.gallery if matcher is not None else IdentityGallery.from_file(IDENTITY_GALLERY_PATH))
         self.person_detector = person_detector or YOLODetector(
@@ -65,6 +70,8 @@ class ShelfIdentityResolver:
         self.matcher = matcher or IdentityMatcher(self.gallery, detector=self.person_detector)
         self.pose_model = pose_model or YOLO(FORWARD_POSE_MODEL_PATH)
         self.capture_burst_frames = capture_burst_frames
+        self.live_frame_provider = live_frame_provider
+        self.show_trigger_preview = show_trigger_preview
 
     def resolve_event(
         self,
@@ -72,18 +79,11 @@ class ShelfIdentityResolver:
         source: int | str | Path,
     ) -> ShelfIdentityResolutionResult:
         source_path = str(source)
-        capture_source = source if isinstance(source, int) else source_path
-        cap = cv2.VideoCapture(capture_source)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open forward camera source: {source_path}")
+        frame_results: list[ShelfIdentityResolutionResult] = []
 
-        try:
-            frame_results: list[ShelfIdentityResolutionResult] = []
-            for frame_idx in range(self.capture_burst_frames):
-                ok, frame = cap.read()
-                if not ok:
-                    break
-
+        if self.live_frame_provider is not None and isinstance(source, int):
+            frames = self.live_frame_provider(source, self.capture_burst_frames)
+            for frame_idx, frame in enumerate(frames):
                 frame_results.append(
                     self.resolve_frame(
                         frame,
@@ -92,8 +92,43 @@ class ShelfIdentityResolver:
                         source_label=source_path,
                     )
                 )
-        finally:
-            cap.release()
+        else:
+            capture_source = source if isinstance(source, int) else source_path
+            cap = cv2.VideoCapture(capture_source)
+            if not cap.isOpened():
+                raise RuntimeError(f"Could not open forward camera source: {source_path}")
+
+            try:
+                for frame_idx in range(self.capture_burst_frames):
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+
+                    if self.show_trigger_preview:
+                        preview = frame.copy()
+                        self._draw_trigger_preview_overlay(
+                            preview,
+                            source_label=source_path,
+                            frame_idx=frame_idx,
+                        )
+                        cv2.imshow(self.PREVIEW_WINDOW_NAME, preview)
+                        cv2.waitKey(1)
+
+                    frame_results.append(
+                        self.resolve_frame(
+                            frame,
+                            trigger_event=trigger_event,
+                            frame_index=frame_idx,
+                            source_label=source_path,
+                        )
+                    )
+            finally:
+                cap.release()
+                if self.show_trigger_preview:
+                    try:
+                        cv2.destroyWindow(self.PREVIEW_WINDOW_NAME)
+                    except Exception:
+                        pass
 
         if not frame_results:
             return self._empty_result(trigger_event, source_path, reason_frame_index=0)
@@ -303,6 +338,30 @@ class ShelfIdentityResolver:
         if quantity < 0:
             return "returned"
         return str(event.get("event_type", "unknown"))
+
+    def _draw_trigger_preview_overlay(
+        self,
+        frame: np.ndarray,
+        source_label: str,
+        frame_idx: int,
+    ) -> None:
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], 90), (20, 20, 20), -1)
+        lines = [
+            f"Forward camera triggered | source {source_label}",
+            f"Capture frame: {frame_idx + 1}/{self.capture_burst_frames}",
+            "Resolving person for shelf event",
+        ]
+        for i, line in enumerate(lines):
+            y = 28 + i * 24
+            cv2.putText(
+                frame,
+                line,
+                (12, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (240, 240, 240),
+                2,
+            )
 
     def _empty_result(
         self,

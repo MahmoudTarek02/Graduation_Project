@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,7 @@ class ShelfItemMonitor:
         self._class_names = {}
         self._sessions: dict[str, ShelfCameraSession] = {}
         self._hand_tracker = None
+        self._preview_windows: set[str] = set()
 
     def prepare_sources(self, sources: list[int | str | Path]) -> None:
         self._ensure_models()
@@ -96,12 +98,15 @@ class ShelfItemMonitor:
         source: int | str | Path,
         trigger_event: dict | None = None,
         actor_side_hint: str = "unknown-side",
+        zone_presence: dict | None = None,
+        on_hand_detected: Callable[[dict], None] | None = None,
     ) -> ShelfInteractionResult:
         self._ensure_models()
         self._ensure_hand_tracker()
         session = self._get_or_create_session(source)
         cap = session.cap
         source_label = session.source_label
+        zone_id = trigger_event.get("zone_id") if trigger_event else None
 
         if isinstance(source, int):
             for _ in range(SHELF_LIVE_BUFFER_FLUSH_FRAMES):
@@ -115,7 +120,8 @@ class ShelfItemMonitor:
 
         # Min and max frames to process dynamically
         min_frames = max(30, self.live_analysis_frames // 2)
-        max_frames = max(120, self.live_analysis_frames * 2)
+        max_frames = max(450, self.live_analysis_frames * 8)
+        hand_triggered = False
 
         frame_idx = 0
         while cap is not None and cap.isOpened():
@@ -136,6 +142,22 @@ class ShelfItemMonitor:
             # Check hand presence
             hands = self._hand_tracker.detect(frame)
             hand_present = len(hands) > 0
+            if hand_present and not hand_triggered:
+                hand_triggered = True
+                if on_hand_detected is not None:
+                    on_hand_detected(
+                        {
+                            "source_label": source_label,
+                            "frame_idx": frame_idx,
+                            "zone_id": zone_id,
+                            "actor_side": actor_side_hint,
+                        }
+                    )
+
+            # Check shopper presence if provided by the caller
+            shopper_present = True
+            if zone_presence is not None and zone_id is not None:
+                shopper_present = zone_presence.get(zone_id, False)
 
             # Check stability of counts
             counts_stable = len(stable_count_history) == settle_window and all(
@@ -144,16 +166,20 @@ class ShelfItemMonitor:
 
             # Exit criteria
             if frame_idx >= min_frames:
-                if not hand_present and counts_stable:
-                    print(f"[ShelfItemMonitor] Settled and hand-free at frame {frame_idx + 1}")
+                if not shopper_present and not hand_present and counts_stable:
+                    print(f"[ShelfItemMonitor] Shopper left, settled and hand-free at frame {frame_idx + 1}")
                     break
                 if frame_idx >= max_frames:
                     print(f"[ShelfItemMonitor] Reached max frame limit ({max_frames}) at frame {frame_idx + 1}")
                     break
 
             if self.show_preview:
+                window_name = f"Shelf Live Preview - source {source_label}"
+                self._preview_windows.add(window_name)
                 preview = frame.copy()
                 status_text = "Interacting (hand present)" if hand_present else ("Settling..." if not counts_stable else "Stable")
+                if shopper_present and not hand_present:
+                    status_text = "Shopper present (waiting for interaction)"
                 self._draw_preview_overlay(
                     preview=preview,
                     source_label=source_label,
@@ -162,13 +188,10 @@ class ShelfItemMonitor:
                     status_text=status_text,
                 )
                 self._draw_detections(preview, detections)
-                cv2.imshow(f"Shelf Live Preview - source {source_label}", preview)
+                cv2.imshow(window_name, preview)
                 cv2.waitKey(1)
 
             frame_idx += 1
-
-        if self.show_preview:
-            cv2.destroyWindow(f"Shelf Live Preview - source {source_label}")
 
         total_frames = len(all_frame_counts)
         # Establish stable "before" count from the start
@@ -261,6 +284,12 @@ class ShelfItemMonitor:
         for session in self._sessions.values():
             session.close()
         self._sessions.clear()
+        for window_name in list(self._preview_windows):
+            try:
+                cv2.destroyWindow(window_name)
+            except Exception:
+                pass
+        self._preview_windows.clear()
         if self._hand_tracker is not None:
             try:
                 self._hand_tracker.close()
