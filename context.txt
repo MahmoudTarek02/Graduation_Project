@@ -273,11 +273,30 @@ Always import constants from config.py, never hardcode values.
   - Updated [identity_matcher.py](/workspaces/Graduation_Project/identity_matcher.py)
       - Forward detector now uses the forward-camera confidence threshold from config
 
-  Validation:
 
-  - py_compile passed for the updated modules
-  - I ran the new resolver test against Videos/vid.mp4; it completed without errors and returned an unresolved result for that clip because no person was detected in
-    the captured burst
 
-  This is wired for the integration model you described: the shelf counter produces taken or returned, and Phase 4 resolves the person against gallery.pkl without re-
-  deciding the shelf action.
+
+• What remains is the integration phase, not more core model work.
+
+  Concretely:
+
+  1. Wire the shelf counting output into ShelfIdentityResolver
+      - when the counter emits a confirmed taken or returned, pass that event into the forward-camera resolver
+
+  2. Define the end-to-end orchestrator
+      - one place that coordinates:
+          - shelf count event
+          - forward camera burst
+          - person match against gallery.pkl
+          - final combined result
+
+  3. Clean up the phase-3/4 boundary
+      - right now the worktree still shows the older tracking files removed and the counting path in progress
+      - decide whether the repo should keep only the counting-based shelf path and remove the old tracking artifacts entirely
+
+  4. Run an end-to-end test
+      - shelf clip or synthetic event
+      - forward-camera clip
+      - verify the final output links taken/returned to the matched person ID
+
+  So the next phase is really “system integration.” The individual pieces are now there.
