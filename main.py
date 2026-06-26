@@ -7,14 +7,9 @@ from pathlib import Path
 
 import cv2
 
-from config import (
-    MAX_CAMERA_INDEX_TO_PROBE,
-    SHELF_ITEM_CONFIDENCE_THRESHOLD,
-    SHELF_ITEM_MODEL_PATH,
-)
+from config import MAX_CAMERA_INDEX_TO_PROBE, SHELF_ITEM_CONFIDENCE_THRESHOLD, SHELF_ITEM_MODEL_PATH
 from hand_tracker import MediaPipeHandTracker
 from shelf_checkout import ShelfItemMonitor
-from shelf_identity_resolver import ShelfIdentityResolver
 
 
 def _parse_source(value: str) -> int | str:
@@ -43,7 +38,6 @@ class CameraSelector:
                 return index
             if result is None:
                 raise RuntimeError("Camera selection aborted by user.")
-
         raise RuntimeError(f"No available cameras found for {label}.")
 
     def _preview_and_confirm(self, index: int, label: str) -> bool | None:
@@ -54,20 +48,21 @@ class CameraSelector:
 
         cv2.namedWindow(self.WINDOW_NAME, cv2.WINDOW_NORMAL)
         result = False
-
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
 
             preview = frame.copy()
-            lines = [
-                f"{label}: camera {index}",
-                "Press Y to select this camera",
-                "Press N to try the next camera",
-                "Press Q to abort",
-            ]
-            self._draw_hud(preview, lines)
+            self._draw_hud(
+                preview,
+                [
+                    f"{label}: camera {index}",
+                    "Press Y to select this camera",
+                    "Press N to try the next camera",
+                    "Press Q to abort",
+                ],
+            )
             cv2.imshow(self.WINDOW_NAME, preview)
 
             key = cv2.waitKey(1) & 0xFF
@@ -100,8 +95,74 @@ class CameraSelector:
             )
 
 
-def _rolling_counts(history: deque[Counter], class_names: dict) -> dict[str, int]:
-    del class_names
+class ForwardCameraSession:
+    WINDOW_NAME = "Forward Camera Trigger"
+
+    def __init__(self, source: int | str):
+        self.source = source
+        self.cap: cv2.VideoCapture | None = None
+        self.active = False
+
+    def start(self) -> bool:
+        if self.active and self.cap is not None and self.cap.isOpened():
+            return True
+
+        self.cap = cv2.VideoCapture(self.source)
+        if not self.cap.isOpened():
+            self.cap.release()
+            self.cap = None
+            print(f"[ForwardCamera] Could not open source {self.source}")
+            return False
+
+        self.active = True
+        print("[ForwardCamera] Triggered by hand detection.")
+        return True
+
+    def show_frame(self) -> None:
+        if not self.active or self.cap is None:
+            return
+
+        ok, frame = self.cap.read()
+        if not ok:
+            self.stop()
+            return
+
+        preview = frame.copy()
+        cv2.rectangle(preview, (0, 0), (preview.shape[1], 70), (20, 20, 20), -1)
+        cv2.putText(
+            preview,
+            f"Forward camera active | source {self.source}",
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (240, 240, 240),
+            2,
+        )
+        cv2.putText(
+            preview,
+            "Stops when no hand is detected on shelf camera",
+            (12, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (120, 220, 255),
+            2,
+        )
+        cv2.imshow(self.WINDOW_NAME, preview)
+
+    def stop(self) -> None:
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        if self.active:
+            print("[ForwardCamera] Stopped.")
+        self.active = False
+        try:
+            cv2.destroyWindow(self.WINDOW_NAME)
+        except Exception:
+            pass
+
+
+def _rolling_counts(history: deque[Counter]) -> dict[str, int]:
     if not history:
         return {}
 
@@ -111,7 +172,7 @@ def _rolling_counts(history: deque[Counter], class_names: dict) -> dict[str, int
             totals[cls] += count
 
     n = len(history)
-    stable_counts = {}
+    stable_counts: dict[str, int] = {}
     for cls, total in totals.items():
         value = round(total / n)
         if value > 0:
@@ -119,60 +180,24 @@ def _rolling_counts(history: deque[Counter], class_names: dict) -> dict[str, int
     return stable_counts
 
 
-def _resolve_cart_update(
-    resolver: ShelfIdentityResolver,
-    forward_source: int | str,
-    actor_side: str,
-    class_name: str,
-    quantity: int,
-) -> None:
-    result = resolver.resolve_event(
-        {
-            "class_name": class_name,
-            "quantity": quantity,
-            "frame_taken": 0,
-            "actor_side": actor_side,
-        },
-        source=forward_source,
-    )
-
-    print(
-        f"    forward_result: event={result.event_type} "
-        f"class={class_name} "
-        f"quantity={quantity} "
-        f"person_id={result.person_id} "
-        f"score={result.score} "
-        f"method={result.selection_method} "
-        f"person_count={result.person_count}"
-    )
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run shelf-camera cart detection and trigger the forward camera on committed cart updates"
+        description="Shelf camera always on; trigger forward camera only while a hand is detected"
     )
     parser.add_argument("shelf_source", nargs="?", help="Item-facing camera index or video path")
     parser.add_argument("forward_source", nargs="?", help="Forward-facing camera index or video path")
     parser.add_argument(
-        "--actor-side",
-        default="unknown-side",
-        help="Optional shelf-side hint attached to generated forward-camera events",
-    )
-    parser.add_argument(
         "--settle-frames",
         type=int,
         default=5,
-        help="Number of consecutive stable frames required after the hand leaves before committing cart updates",
+        help="Consecutive stable frames required after the hand leaves before cart updates commit",
     )
     args = parser.parse_args()
 
     if args.shelf_source is None and args.forward_source is None:
         selector = CameraSelector()
         forward_source = selector.choose_camera(label="Forward-facing camera")
-        shelf_source = selector.choose_camera(
-            label="Item-facing camera",
-            excluded={forward_source},
-        )
+        shelf_source = selector.choose_camera(label="Item-facing camera", excluded={forward_source})
     elif args.shelf_source is not None and args.forward_source is not None:
         shelf_source = _parse_source(args.shelf_source)
         forward_source = _parse_source(args.forward_source)
@@ -180,7 +205,7 @@ def main() -> int:
         parser.error("Provide both shelf_source and forward_source, or provide neither to choose cameras interactively.")
 
     print("=" * 60)
-    print("Shelf Cart Monitor + Forward Camera Trigger")
+    print("Shelf Camera + Hand-Triggered Forward Camera")
     print("=" * 60)
     print(f"Loading YOLO model: {SHELF_ITEM_MODEL_PATH}...")
 
@@ -193,7 +218,7 @@ def main() -> int:
 
     print("Loading MediaPipe Hand Tracker...")
     hand_tracker = MediaPipeHandTracker()
-    resolver = ShelfIdentityResolver(show_trigger_preview=True)
+    forward_session = ForwardCameraSession(forward_source)
 
     print(f"\nOpening item-facing source: {shelf_source}...")
     cap = cv2.VideoCapture(shelf_source)
@@ -204,11 +229,10 @@ def main() -> int:
 
     print("\nSources ready.")
     print("Instructions:")
-    print("  - Interact with items in front of the item-facing camera.")
-    print("  - While your hand is present, cart updates are paused.")
-    print("  - After your hand leaves and counts settle, cart changes are committed.")
-    print("  - Each committed change triggers the forward-facing camera.")
-    print("  - Press 'q' in the window to quit.")
+    print("  - Item-facing camera stays on continuously.")
+    print("  - When a hand is detected, the forward-facing camera opens.")
+    print("  - When no hand is detected, the forward-facing camera stops.")
+    print("  - Press 'q' in either window to quit.")
     print("-" * 60)
 
     window_size = 15
@@ -220,8 +244,8 @@ def main() -> int:
     in_interaction = False
     settle_counter = 0
 
-    window_name = "Shelf Cart Monitor"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    shelf_window_name = "Shelf Cart Monitor"
+    cv2.namedWindow(shelf_window_name, cv2.WINDOW_NORMAL)
     frame_count = 0
     start_time = time.time()
 
@@ -236,6 +260,11 @@ def main() -> int:
             hands = hand_tracker.detect(frame)
             hand_present = len(hands) > 0
 
+            if hand_present:
+                forward_session.start()
+            else:
+                forward_session.stop()
+
             frame_counts = Counter()
             for det in detections:
                 cls = int(det[5])
@@ -243,19 +272,19 @@ def main() -> int:
                 frame_counts[class_name] += 1
 
             counts_history.append(frame_counts)
-            rolling_stable_counts = _rolling_counts(counts_history, monitor._class_names)
+            rolling_stable_counts = _rolling_counts(counts_history)
 
             status_text = "Stable (Ready)"
             status_color = (0, 255, 0)
 
             if hand_present:
-                status_text = "Interacting (Hand Present - Cart Paused)"
+                status_text = "Interacting (Hand Present - Forward Camera Active)"
                 status_color = (0, 100, 255)
                 if not in_interaction:
                     in_interaction = True
                     last_stable_inventory = dict(current_stable_counts)
                     timestamp = time.strftime("%H:%M:%S")
-                    print(f"\n[{timestamp}] [SHOPPER INTERACTING] Hand entered shelf. Pausing cart updates...")
+                    print(f"\n[{timestamp}] [SHOPPER INTERACTING] Hand entered shelf.")
                     print(f"  Baseline Inventory: {last_stable_inventory}")
                 settle_counter = 0
             elif in_interaction:
@@ -272,40 +301,26 @@ def main() -> int:
                     settle_counter = 0
                     timestamp = time.strftime("%H:%M:%S")
                     all_keys = set(last_stable_inventory.keys()).union(rolling_stable_counts.keys())
-                    committed_changes: list[tuple[str, int]] = []
+                    cart_changes = []
 
                     for cls in sorted(all_keys):
                         prev = last_stable_inventory.get(cls, 0)
                         curr = rolling_stable_counts.get(cls, 0)
                         diff = curr - prev
-                        if diff == 0:
-                            continue
-                        quantity = -diff
-                        committed_changes.append((cls, quantity))
+                        if diff < 0:
+                            cart_changes.append(f"Taken: {abs(diff)}x {cls}")
+                        elif diff > 0:
+                            cart_changes.append(f"Returned: {diff}x {cls}")
 
-                    if committed_changes:
+                    if cart_changes:
                         print(f"\n[{timestamp}] [CART ASSIGNMENT COMMIT] Cart updated:")
-                        for cls, quantity in committed_changes:
-                            if quantity > 0:
-                                print(f"  * Taken: {quantity}x {cls}")
-                            else:
-                                print(f"  * Returned: {abs(quantity)}x {cls}")
-
-                        print("  Triggering forward-facing camera...")
-                        for cls, quantity in committed_changes:
-                            _resolve_cart_update(
-                                resolver=resolver,
-                                forward_source=forward_source,
-                                actor_side=args.actor_side,
-                                class_name=cls,
-                                quantity=quantity,
-                            )
+                        for change in cart_changes:
+                            print(f"  * {change}")
                     else:
-                        print(f"\n[{timestamp}] [CART ASSIGNMENT COMMIT] Cart unchanged (occlusion cleared successfully).")
+                        print(f"\n[{timestamp}] [CART ASSIGNMENT COMMIT] Cart unchanged.")
 
                     current_stable_counts = dict(rolling_stable_counts)
-                    current_inventory = dict(current_stable_counts) if current_stable_counts else "Empty"
-                    print(f"  Current Shelf Inventory: {current_inventory}\n")
+                    print(f"  Current Shelf Inventory: {current_stable_counts if current_stable_counts else 'Empty'}\n")
             else:
                 current_stable_counts = dict(rolling_stable_counts)
 
@@ -319,7 +334,7 @@ def main() -> int:
                     cv2.circle(preview, landmark, 3, (0, 0, 255), -1)
                 cv2.circle(preview, hand["wrist"], 8, (0, 140, 255), -1)
 
-            cv2.rectangle(preview, (0, 0), (450, 160), (20, 20, 20), -1)
+            cv2.rectangle(preview, (0, 0), (500, 160), (20, 20, 20), -1)
             cv2.putText(
                 preview,
                 "Stable Shelf Inventory:",
@@ -376,14 +391,18 @@ def main() -> int:
                 2,
             )
 
-            cv2.imshow(window_name, preview)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.imshow(shelf_window_name, preview)
+            forward_session.show_frame()
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 print("\nUser requested exit.")
                 break
     finally:
         cap.release()
         hand_tracker.close()
         monitor.close()
+        forward_session.stop()
         cv2.destroyAllWindows()
 
     print("=" * 60)
